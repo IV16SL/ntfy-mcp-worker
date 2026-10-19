@@ -264,7 +264,15 @@ async function handleProtocol(request: Request, env: Env): Promise<Response> {
     if (route.kind === "subscribe") {
       if (request.method !== "GET") return new Response("Method Not Allowed", { status: 405 });
       const params = new URLSearchParams(url.searchParams);
-      params.set("topics", parseTopics(route.topics).join(",")); params.set("format", route.format);
+      params.set("topics", parseTopics(route.topics).join(","));
+      params.set("format", route.format);
+      if (route.format === "ws") {
+        // WebSocket upgrade: forward the original request (with its
+        // Upgrade/Connection/Sec-WebSocket-* headers) to the Durable Object.
+        // A synthesized subrequest without "Upgrade: websocket" makes the
+        // runtime reject the 101 response.
+        return serverStub(env).fetch(new Request(`https://ntfy.internal/subscribe?${params}`, request));
+      }
       return callServer(env, `/subscribe?${params}`);
     }
     if (route.kind === "manage_alias") {
