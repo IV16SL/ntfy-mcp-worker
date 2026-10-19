@@ -2,6 +2,11 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "ntfy-mcp-worker",
   "main": "src/ios-compat.ts",
+  "assets": {
+    "directory": "webapp",
+    "binding": "ASSETS",
+    "not_found_handling": "none"
+  },
   "keep_vars": true,
   "compatibility_date": "2026-09-03",
   "compatibility_flags": ["nodejs_compat"],

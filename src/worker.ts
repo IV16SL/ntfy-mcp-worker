@@ -345,6 +345,84 @@ function createServer(env: Env) {
   return server;
 }
 
+// ---------------------------------------------------------------------------
+// Web app (ported from upstream ntfy web/; built output committed under webapp/)
+// Served via the ASSETS binding (wrangler.jsonc "assets"). Mirrors upstream
+// server.go: bare GET /<topic> renders the SPA (client route /:topic),
+// /config.js is rendered dynamically, /static/* and /sw.js are static files.
+// ---------------------------------------------------------------------------
+const WEBAPP_INDEX_PATHS = new Set(["/", "/app", "/app.html", "/index.html"]);
+// Single-segment paths reserved by the API; never treated as SPA topic routes.
+const WEBAPP_RESERVED = new Set(["v1", "admin", "mcp", "webhook", "file", "health"]);
+
+async function fetchWebAsset(env: Env, path: string): Promise<Response> {
+  return env.ASSETS.fetch(new Request(`https://webapp.internal${path}`));
+}
+
+function webAppConfigJs(request: Request, env: Env): Response {
+  // Consumed by the SPA via <script src="/config.js"> as window.config.
+  // Mirrors upstream handleWebConfig; every ntfy.sh-only feature is off.
+  const config = {
+    base_url: baseUrl(request, env),
+    app_root: "/",
+    enable_login: false,
+    enable_signup: false,
+    enable_reservations: false,
+    enable_payments: false,
+    enable_calls: false,
+    enable_emails: false,
+    enable_web_push: false,
+    enable_reset_password: false,
+    require_login: false,
+    disallowed_topics: [] as string[],
+  };
+  return new Response(`window.config=${JSON.stringify(config)};`, {
+    headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
+function webAppManifest(): Response {
+  return new Response(JSON.stringify({
+    name: "ntfy",
+    short_name: "ntfy",
+    start_url: "/",
+    display: "standalone",
+    background_color: "#ffffff",
+    theme_color: "#317f6f",
+    icons: [
+      { src: "/static/images/pwa-192x192.png", sizes: "192x192", type: "image/png" },
+      { src: "/static/images/pwa-512x512.png", sizes: "512x512", type: "image/png" },
+    ],
+  }), {
+    headers: { "content-type": "application/manifest+json", "cache-control": "no-store" },
+  });
+}
+
+// Returns a Response for web-app paths, or null to fall through to the API router.
+async function serveWebApp(request: Request, env: Env, url: URL): Promise<Response | null> {
+  const pathname = url.pathname;
+  if (pathname === "/config.js") return webAppConfigJs(request, env);
+  if (pathname === "/manifest.webmanifest") return webAppManifest();
+  if (pathname === "/favicon.ico") return fetchWebAsset(env, "/static/images/favicon.ico");
+  let assetPath: string | null = null;
+  if (WEBAPP_INDEX_PATHS.has(pathname)) assetPath = "/index.html";
+  else if (pathname === "/sw.js" || pathname.startsWith("/static/")) assetPath = pathname;
+  else if (/^\/[^/]+$/.test(pathname) && !WEBAPP_RESERVED.has(pathname.slice(1))) {
+    // Bare topic path -> SPA client-side route (mirrors upstream handleTopic).
+    assetPath = "/index.html";
+  }
+  if (!assetPath) return null;
+  const res = await fetchWebAsset(env, assetPath);
+  if (!res.ok) return null;
+  if (assetPath === "/index.html") {
+    // Never cache the app shell; hashed assets underneath are immutable.
+    const headers = new Headers(res.headers);
+    headers.set("cache-control", "no-store");
+    return new Response(res.body, { status: res.status, headers });
+  }
+  return res;
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -413,6 +491,10 @@ export default {
         return proxyAdmin(request, env, `${internal}${request.method === "GET" ? url.search : ""}`);
       }
       return createMcpHandler(() => createServer(env), { route: "/mcp", responseMode: "json" })(request, env, ctx);
+    }
+    if ((request.method === "GET" || request.method === "HEAD") && !url.pathname.startsWith("/admin") && url.pathname !== "/mcp") {
+      const webResponse = await serveWebApp(request, env, url);
+      if (webResponse) return webResponse;
     }
     if (url.pathname === "/") {
       if (request.method === "POST" && (request.headers.get("content-type") || "").toLowerCase().includes("application/json")) return handleProtocol(request, env);

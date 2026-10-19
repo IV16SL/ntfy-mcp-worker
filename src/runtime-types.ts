@@ -1,5 +1,6 @@
 export interface Env {
   NTFY_SERVER: DurableObjectNamespace;
+  ASSETS: Fetcher;
   BASE_URL?: string;
   WEBHOOK_MASTER_SECRET?: string;
   UPSTREAM_BASE_URL?: string;
