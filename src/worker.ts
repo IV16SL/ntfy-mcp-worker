@@ -83,6 +83,55 @@ async function verifyTopicAccess(request: Request, env: Env): Promise<boolean> {
 }
 
 function protocolDenied() { return Response.json({ code: 40101, http: 401, error: "unauthorized" }, { status: 401, headers: { "www-authenticate": "Basic realm=\"ntfy\", Bearer" } }); }
+
+// ---- Minimal account API for the ported web app's Login page ----
+// POST /v1/account/login    Basic auth against NTFY_USERNAME/NTFY_PASSWORD -> { token, username }
+// GET  /v1/account         200 always (anonymous-safe, like upstream); session info when Bearer matches
+// DELETE /v1/account/token stateless logout (the app clears its local session regardless)
+function parseBasicCredentials(request: Request): { username: string; password: string } | null {
+  const auth = request.headers.get("authorization") || "";
+  if (!auth.startsWith("Basic ")) return null;
+  try {
+    const decoded = Buffer.from(auth.slice(6), "base64").toString("utf8");
+    const idx = decoded.indexOf(":");
+    if (idx < 0) return null;
+    return { username: decoded.slice(0, idx), password: decoded.slice(idx + 1) };
+  } catch { return null; }
+}
+
+function accountResponse(data: unknown, status = 200): Response {
+  return Response.json(data, { status, headers: { "cache-control": "no-store" } });
+}
+
+function handleAccount(request: Request, env: Env, pathname: string): Response | null {
+  if (pathname === "/v1/account/login") {
+    if (request.method !== "POST") return accountResponse({ code: 40501, http: 405, error: "method not allowed" }, 405);
+    const creds = parseBasicCredentials(request);
+    if (!env.NTFY_USERNAME || !env.NTFY_PASSWORD || !creds ||
+        creds.username !== env.NTFY_USERNAME || creds.password !== env.NTFY_PASSWORD) {
+      return accountResponse({ code: 40101, http: 401, error: "unauthorized" }, 401);
+    }
+    if (!env.NTFY_ACCESS_TOKEN) {
+      return accountResponse({ code: 40001, http: 400, error: "web login requires NTFY_ACCESS_TOKEN to be configured" }, 400);
+    }
+    return accountResponse({ token: env.NTFY_ACCESS_TOKEN, username: env.NTFY_USERNAME });
+  }
+  if (pathname === "/v1/account") {
+    if (request.method !== "GET") return accountResponse({ code: 40501, http: 405, error: "method not allowed" }, 405);
+    // Anonymous-safe like upstream ntfy.sh: never 401 here, otherwise the web app
+    // wipes the session and redirects to /login on unrelated calls (e.g. PublishDialog).
+    const auth = request.headers.get("authorization") || "";
+    if (env.NTFY_ACCESS_TOKEN && auth === `Bearer ${env.NTFY_ACCESS_TOKEN}`) {
+      return accountResponse({ username: env.NTFY_USERNAME || "admin", role: "admin", limits: {}, stats: {} });
+    }
+    return accountResponse({ limits: {}, stats: {} });
+  }
+  if (pathname === "/v1/account/token") {
+    if (request.method !== "DELETE") return accountResponse({ code: 40501, http: 405, error: "method not allowed" }, 405);
+    return accountResponse({});
+  }
+  return null;
+}
 function adminDenied(env: Env) {
   const configured = Boolean(env.ADMIN_TOKEN || (env.TEAM_DOMAIN && env.POLICY_AUD));
   return Response.json({
@@ -365,7 +414,7 @@ function webAppConfigJs(request: Request, env: Env): Response {
   const config = {
     base_url: baseUrl(request, env),
     app_root: "/",
-    enable_login: false,
+    enable_login: true, // Web login page enabled; auth is validated against NTFY_USERNAME/NTFY_PASSWORD
     enable_signup: false,
     enable_reservations: false,
     enable_payments: false,
@@ -439,7 +488,11 @@ export default {
       },
     });
     if (url.pathname === "/health" || url.pathname === "/v1/health") return Response.json({ healthy: true, ok: true, service: "ntfy-mcp-worker", version: VERSION });
-    if (url.pathname === "/v1/config") return Response.json({ base_url: baseUrl(request, env), enable_login: false, enable_signup: false, enable_reservations: false, app_root: "/" });
+    if (url.pathname === "/v1/config") return Response.json({ base_url: baseUrl(request, env), enable_login: true, enable_signup: false, enable_reservations: false, app_root: "/" });
+    if (url.pathname === "/v1/account/login" || url.pathname === "/v1/account" || url.pathname === "/v1/account/token") {
+      const accountRes = handleAccount(request, env, url.pathname);
+      if (accountRes) return accountRes;
+    }
     if (url.pathname === "/admin" || url.pathname.startsWith("/admin/api/") || url.pathname === "/mcp") {
       if (!(await verifyAdminAccess(request, env))) return adminDenied(env);
       if (url.pathname === "/admin") {
