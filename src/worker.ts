@@ -103,7 +103,7 @@ function accountResponse(data: unknown, status = 200): Response {
   return Response.json(data, { status, headers: { "cache-control": "no-store" } });
 }
 
-function handleAccount(request: Request, env: Env, pathname: string): Response | null {
+async function handleAccount(request: Request, env: Env, pathname: string): Promise<Response | null> {
   if (pathname === "/v1/account/login") {
     if (request.method !== "POST") return accountResponse({ code: 40501, http: 405, error: "method not allowed" }, 405);
     const creds = parseBasicCredentials(request);
@@ -122,7 +122,23 @@ function handleAccount(request: Request, env: Env, pathname: string): Response |
     // wipes the session and redirects to /login on unrelated calls (e.g. PublishDialog).
     const auth = request.headers.get("authorization") || "";
     if (env.NTFY_ACCESS_TOKEN && auth === `Bearer ${env.NTFY_ACCESS_TOKEN}`) {
-      return accountResponse({ username: env.NTFY_USERNAME || "admin", role: "admin", limits: {}, stats: {} });
+      // Real message count from the Durable Object; zeros keep the Account page
+      // (which calls .toLocaleString() on every stat) from crashing.
+      let messageCount = 0;
+      try {
+        const status = await callServerJson<{ messages?: number }>(env, "/admin/status");
+        messageCount = Number(status.messages || 0);
+      } catch { /* fall back to 0 */ }
+      return accountResponse({
+        username: env.NTFY_USERNAME || "admin",
+        role: "admin",
+        stats: { reservations: 0, messages: messageCount, emails: 0, calls: 0, attachment_total_size: 0 },
+        limits: {
+          reservations: 0, messages: 0, emails: 0, calls: 0,
+          attachment_file_size: 0, attachment_total_size: 0, attachment_expiry_duration: 0,
+          basis: "ip",
+        },
+      });
     }
     return accountResponse({ limits: {}, stats: {} });
   }
@@ -490,7 +506,7 @@ export default {
     if (url.pathname === "/health" || url.pathname === "/v1/health") return Response.json({ healthy: true, ok: true, service: "ntfy-mcp-worker", version: VERSION });
     if (url.pathname === "/v1/config") return Response.json({ base_url: baseUrl(request, env), enable_login: true, enable_signup: false, enable_reservations: false, app_root: "/" });
     if (url.pathname === "/v1/account/login" || url.pathname === "/v1/account" || url.pathname === "/v1/account/token") {
-      const accountRes = handleAccount(request, env, url.pathname);
+      const accountRes = await handleAccount(request, env, url.pathname);
       if (accountRes) return accountRes;
     }
     if (url.pathname === "/admin" || url.pathname.startsWith("/admin/api/") || url.pathname === "/mcp") {
