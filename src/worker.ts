@@ -509,6 +509,10 @@ export default {
       const accountRes = await handleAccount(request, env, url.pathname);
       if (accountRes) return accountRes;
     }
+    // Upstream embeds a docs site under /docs; this port doesn't ship one.
+    if (url.pathname === "/docs" || url.pathname.startsWith("/docs/")) {
+      return Response.json({ code: 40401, http: 404, error: "not found" }, { status: 404 });
+    }
     if (url.pathname === "/admin" || url.pathname.startsWith("/admin/api/") || url.pathname === "/mcp") {
       if (!(await verifyAdminAccess(request, env))) return adminDenied(env);
       if (url.pathname === "/admin") {
