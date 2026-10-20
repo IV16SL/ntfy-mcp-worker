@@ -18,7 +18,7 @@ It is designed for personal or small self-hosted deployments that want ntfy-comp
 - Optional Basic/Bearer authentication for ntfy protocol routes
 - iOS wake-up support through the official ntfy upstream/APNs path
 - Streamable HTTP MCP endpoint at `/mcp`
-- Admin UI at `/admin`
+- Admin API at `/admin/api` (JSON; the old web admin UI was removed)
 - Capacity-based automatic history cleanup
 
 ## Architecture
@@ -29,7 +29,7 @@ Publishers / ntfy clients / MCP client
                 v
          Cloudflare Worker
         /       |        \
-   ntfy API    /mcp     /admin
+   ntfy API    /mcp     /admin/api
         |        |         |
         +--------+---------+
                  |
@@ -105,18 +105,48 @@ For each published message, the Worker sends an empty poll request to a hashed u
 
 The `/mcp` endpoint uses the same admin-authentication model as `/admin`.
 
-## Admin UI
+## Admin API
 
-`/admin` provides:
+There is no web admin UI; the remaining admin surface is a JSON API under
+`/admin/api/*`, protected by `ADMIN_TOKEN` (via `Authorization: Bearer
+<token>` or `X-Admin-Token: <token>`) or Cloudflare Access. In the examples
+below, `T` is your admin token and `BASE` is your public base URL.
 
-- message/topic/scheduled-delivery summary;
-- history-storage usage;
-- topic filter and search;
-- message metadata and attachment display;
-- immediate physical deletion;
-- configurable 50–700 MB history-storage limit;
-- automatic cleanup status;
-- test notification support through the protected admin API.
+```sh
+T=<ADMIN_TOKEN>; BASE=https://ntfy.example.com
+
+# Server status: message/topic/scheduled counts, subscriber counts, storage usage
+curl -H "Authorization: Bearer $T" "$BASE/admin/api/status"
+
+# Topic list with message counts and last activity
+curl -H "Authorization: Bearer $T" "$BASE/admin/api/topics"
+
+# Browse stored messages (limit<=200, offset, topic, q=search in title/message/id)
+curl -H "Authorization: Bearer $T" "$BASE/admin/api/messages?limit=50&topic=alerts&q=error"
+
+# Physically delete stored messages by id (<=200 at a time)
+curl -X POST -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
+  -d '{"ids":["<message-id-1>","<message-id-2>"]}' "$BASE/admin/api/delete"
+
+# Show/set the history storage limit (50-700 MB)
+curl -X POST -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
+  -d '{"limitMB":300}' "$BASE/admin/api/storage-limit"
+
+# Send a test notification (topic defaults to MCP_DEFAULT_TOPIC or "alerts")
+curl -X POST -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
+  -d '{"topic":"alerts"}' "$BASE/admin/api/test-publish"
+
+# Webhook management: generate a third-party call URL for a topic
+curl -X POST -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
+  -d '{"topic":"AITrend"}' "$BASE/admin/api/webhook/url"
+
+# Webhook config: global default rules and per-topic field mapping
+curl -H "Authorization: Bearer $T" "$BASE/admin/api/webhook/config"
+curl -H "Authorization: Bearer $T" "$BASE/admin/api/webhook/config?topic=AITrend"
+curl -X PUT -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
+  -d '{"scope":"topic","topic":"AITrend","mapping":{"title":"$.title","message":"$.summary"}}' \
+  "$BASE/admin/api/webhook/config"
+```
 
 ## Cloudflare resources
 
@@ -248,7 +278,7 @@ Not currently implemented:
 - Keep all tokens, passwords, Access configuration, and `.dev.vars`/`.env` files out of source control.
 - Public ntfy topic names act like capabilities unless protocol authentication is enabled.
 - Local attachment downloads pass through the Worker and inherit ntfy protocol authentication.
-- `/admin` and `/mcp` should never be exposed without Cloudflare Access or `ADMIN_TOKEN`.
+- `/admin/api` and `/mcp` should never be exposed without Cloudflare Access or `ADMIN_TOKEN`.
 - The repository intentionally contains placeholders such as `ntfy.example.com`; use your own hostname at deployment time.
 
 ## Upstream references
@@ -269,7 +299,14 @@ MIT
 ### 一次启用，默认无需配置映射
 
 1. 在 Cloudflare 控制台进入此 Worker → **设置 → 变量和机密 → 添加**，类型选 **机密（Secret）**，名称填 `WEBHOOK_MASTER_SECRET`，值设为长随机字符串。也可执行 `npx wrangler secret put WEBHOOK_MASTER_SECRET`，按提示输入。可用 `openssl rand -hex 32` 生成随机值。不要把实际值写进仓库或普通前端变量。
-2. 打开已有 `/admin` 管理页，在 **Webhook 管理** 输入目标 topic（例如 `AITrend`），点击 **生成 URL**，再点击 **复制**。
+2. 生成调用 URL（需要先配置 `ADMIN_TOKEN`）：
+
+```sh
+curl -X POST -H "Authorization: Bearer <ADMIN_TOKEN>" -H 'Content-Type: application/json' \
+  -d '{"topic":"AITrend"}' 'https://你的域名/admin/api/webhook/url'
+```
+
+返回的 `url` 即第三方网站的 Webhook 地址。
 3. 将完整 URL 填入第三方网站的 Webhook 地址，方法选择 POST。无需额外请求头凭证，也无需逐个 topic 建立映射配置。
 
 ```sh

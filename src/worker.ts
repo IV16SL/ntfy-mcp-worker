@@ -5,7 +5,6 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { z } from "zod";
-import { ADMIN_PAGE } from "./admin-page.js";
 import {
   boolParam,
   headerOrQuery,
@@ -531,12 +530,11 @@ export default {
     if (url.pathname === "/admin" || url.pathname.startsWith("/admin/api/") || url.pathname === "/mcp") {
       if (!(await verifyAdminAccess(request, env))) return adminDenied(env);
       if (url.pathname === "/admin") {
-        const headers = new Headers({
-          "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-robots-tag": "noindex, nofollow", "x-content-type-options": "nosniff",
-          "referrer-policy": "no-referrer", "content-security-policy": "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; connect-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'",
-        });
-        if (env.ADMIN_TOKEN && url.searchParams.get("token") === env.ADMIN_TOKEN) headers.append("set-cookie", `ntfy_admin=${env.ADMIN_TOKEN}; Path=/admin; HttpOnly; Secure; SameSite=Strict; Max-Age=28800`);
-        return new Response(ADMIN_PAGE, { headers });
+        // The admin web UI was removed; only the JSON admin API (/admin/api/*) remains.
+        return Response.json(
+          { code: 40401, http: 404, error: "admin_ui_removed", message: "The admin web UI was removed; use the /admin/api/* endpoints with a Bearer <redacted>" },
+          { status: 404, headers: { "cache-control": "no-store" } },
+        );
       }
       if (url.pathname.startsWith("/admin/api/")) {
         const suffix = url.pathname.slice("/admin/api".length);
@@ -587,7 +585,7 @@ export default {
     if (url.pathname === "/") {
       if (request.method === "POST" && (request.headers.get("content-type") || "").toLowerCase().includes("application/json")) return handleProtocol(request, env, ctx);
       return Response.json({
-        ok: true, service: "ntfy-mcp-worker", version: VERSION, protocol: "ntfy-compatible", mcp: "/mcp", admin: "/admin", health: "/v1/health",
+        ok: true, service: "ntfy-mcp-worker", version: VERSION, protocol: "ntfy-compatible", mcp: "/mcp", admin_api: "/admin/api", health: "/v1/health",
         iosUpstream: env.UPSTREAM_BASE_URL || "https://ntfy.sh", attachmentStorage: "durable-object-sqlite",
       });
     }
