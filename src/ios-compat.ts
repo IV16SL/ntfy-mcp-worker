@@ -66,4 +66,9 @@ export default {
 
     return worker.fetch(normalized, env, ctx);
   },
+
+  // Inbound email -> publish lives in worker.ts; forward it through.
+  async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext): Promise<void> {
+    return worker.email(message, env, ctx);
+  },
 };

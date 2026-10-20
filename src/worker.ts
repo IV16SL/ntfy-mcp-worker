@@ -1,4 +1,5 @@
 import { generateWebhookSecret, handleWebhook, readWebhookBody, validateMapping, webhookTopic, webhookErrorResponse, WebhookError, WEBHOOK_DEFAULTS } from "./webhook.ts";
+import { emailNotifyConfigured, parseInboundEmail, sendEmailNotification, splitTopicAndSecret } from "./email.js";
 import { Buffer } from "node:buffer";
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
@@ -186,6 +187,7 @@ function normalizeJsonPublish(input: any, fallbackTopic: string | undefined, env
   msg.cache_visible = cache;
   msg.sequence_id = input.sequence_id || input.sequenceId ? validateSequenceId(String(input.sequence_id || input.sequenceId)) : msg.id;
   msg.message = String(input.message ?? "").slice(0, MAX_TEXT_BYTES);
+  if (input.email) msg.email = String(input.email).slice(0, 512);
   if (input.title) msg.title = String(input.title).slice(0, 256);
   msg.priority = parsePriority(input.priority);
   msg.tags = parseTags(input.tags);
@@ -252,6 +254,7 @@ async function parseHttpPublish(request: Request, env: Env, topic: string, seque
   msg.icon = headerOrQuery(request, url, ["X-Icon", "Icon"]).slice(0, 2048) || undefined;
   msg.actions = parseActions(headerOrQuery(request, url, ["X-Actions", "Actions", "Action"]));
   msg.poll_id = headerOrQuery(request, url, ["X-Poll-ID", "Poll-ID"]).slice(0, 64) || undefined;
+  msg.email = headerOrQuery(request, url, ["X-Email", "Email"]).slice(0, 512) || undefined;
   if (boolHeaderOrQuery(request, url, ["X-Markdown", "Markdown", "MD"], false) || contentType === "text/markdown") msg.content_type = "text/markdown";
 
   const externalAttach = headerOrQuery(request, url, ["X-Attach", "Attach"]);
@@ -277,6 +280,18 @@ async function publishStored(env: Env, msg: StoredMessage, publicBaseUrl: string
     if (msg.attachment?.ref) await cleanupUploadedAttachment(env, msg.id);
     throw error;
   }
+}
+
+// Publish, then (if the publisher asked via X-Email and outbound email is
+// configured) forward the stored message as an email in the background.
+async function publishWithEmailNotify(env: Env, msg: StoredMessage, publicBaseUrl: string, ctx?: ExecutionContext): Promise<NtfyMessage> {
+  const targets = msg.email;
+  msg.email = undefined; // transient; never stored
+  const stored = await publishStored(env, msg, publicBaseUrl);
+  if (targets && ctx && emailNotifyConfigured(env)) {
+    ctx.waitUntil(sendEmailNotification(env, stored, targets).catch(() => {}));
+  }
+  return stored;
 }
 
 async function manageMessage(env: Env, topic: string, sequenceId: string, event: "message_delete" | "message_clear", publicBaseUrl: string) {
@@ -321,7 +336,7 @@ function parseNtfyRoute(pathname: string) {
   return { kind: "topic" as const, topic: segments[0], segments };
 }
 
-async function handleProtocol(request: Request, env: Env): Promise<Response> {
+async function handleProtocol(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   if (!(await verifyTopicAccess(request, env))) return protocolDenied();
   const url = new URL(request.url), route = parseNtfyRoute(url.pathname);
   try {
@@ -347,19 +362,19 @@ async function handleProtocol(request: Request, env: Env): Promise<Response> {
     if (route.kind === "topic_sequence" && request.method === "DELETE") return Response.json(await manageMessage(env, validateTopic(route.topic), validateSequenceId(route.sequenceId), "message_delete", baseUrl(request, env)));
     if (route.kind === "topic_sequence" && (request.method === "POST" || request.method === "PUT")) {
       const msg = await parseHttpPublish(request, env, validateTopic(route.topic), validateSequenceId(route.sequenceId));
-      return Response.json(await publishStored(env, msg, baseUrl(request, env)));
+      return Response.json(await publishWithEmailNotify(env, msg, baseUrl(request, env), ctx));
     }
     if (route.kind === "publish_get" && request.method === "GET") {
       const msg = await parseHttpPublish(new Request(request.url, { method: "POST", headers: request.headers, body: url.searchParams.get("message") || "" }), env, validateTopic(route.topic));
-      return Response.json(await publishStored(env, msg, baseUrl(request, env)));
+      return Response.json(await publishWithEmailNotify(env, msg, baseUrl(request, env), ctx));
     }
     if (route.kind === "topic" && (request.method === "POST" || request.method === "PUT")) {
       const msg = await parseHttpPublish(request, env, validateTopic(route.topic));
-      return Response.json(await publishStored(env, msg, baseUrl(request, env)));
+      return Response.json(await publishWithEmailNotify(env, msg, baseUrl(request, env), ctx));
     }
     if (route.kind === "root" && request.method === "POST" && (request.headers.get("content-type") || "").toLowerCase().includes("application/json")) {
       const msg = normalizeJsonPublish(await request.json<any>(), undefined, env);
-      return Response.json(await publishStored(env, msg, baseUrl(request, env)));
+      return Response.json(await publishWithEmailNotify(env, msg, baseUrl(request, env), ctx));
     }
     return new Response("Not Found", { status: 404 });
   } catch (error) { return ntfyError(error); }
@@ -570,13 +585,41 @@ export default {
       if (webResponse) return webResponse;
     }
     if (url.pathname === "/") {
-      if (request.method === "POST" && (request.headers.get("content-type") || "").toLowerCase().includes("application/json")) return handleProtocol(request, env);
+      if (request.method === "POST" && (request.headers.get("content-type") || "").toLowerCase().includes("application/json")) return handleProtocol(request, env, ctx);
       return Response.json({
         ok: true, service: "ntfy-mcp-worker", version: VERSION, protocol: "ntfy-compatible", mcp: "/mcp", admin: "/admin", health: "/v1/health",
         iosUpstream: env.UPSTREAM_BASE_URL || "https://ntfy.sh", attachmentStorage: "durable-object-sqlite",
       });
     }
-    return handleProtocol(request, env);
+    return handleProtocol(request, env, ctx);
+  },
+
+  // Inbound email -> publish (Cloudflare Email Routing). The recipient local
+  // part is the topic; see src/email.ts for the address format.
+  async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext): Promise<void> {
+    const local = (message.to || "").split("@")[0].toLowerCase();
+    const { topic, secret } = splitTopicAndSecret(local);
+    if (env.EMAIL_PUBLISH_SECRET && secret !== env.EMAIL_PUBLISH_SECRET) {
+      message.setReject("Invalid publish secret");
+      return;
+    }
+    let validTopic: string;
+    try {
+      validTopic = validateTopic(topic);
+    } catch {
+      message.setReject("Unknown recipient");
+      return;
+    }
+    try {
+      const { subject, text } = await parseInboundEmail(message.raw);
+      const msg = messageDefaults(validTopic, env);
+      if (subject) msg.title = subject.slice(0, 256);
+      msg.message = (text || subject || "").slice(0, MAX_TEXT_BYTES);
+      msg.tags = parseTags("email");
+      await publishStored(env, msg, normalizeBaseUrl(env.BASE_URL || ""));
+    } catch {
+      message.setReject("Failed to process email");
+    }
   },
 };
 

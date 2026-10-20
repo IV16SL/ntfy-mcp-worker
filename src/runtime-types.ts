@@ -7,6 +7,9 @@ export interface Env {
   UPSTREAM_ACCESS_TOKEN?: string;
   NTFY_USERNAME?: string;
   NTFY_PASSWORD?: string;
+  RESEND_API_KEY?: string;
+  EMAIL_FROM?: string;
+  EMAIL_PUBLISH_SECRET?: string;
   NTFY_ACCESS_TOKEN?: string;
   TEAM_DOMAIN?: string;
   POLICY_AUD?: string;
@@ -67,6 +70,8 @@ export type StoredMessage = Omit<NtfyMessage, "attachment"> & {
   scheduled_at?: number;
   admin_delete_at?: number;
   created_at: string;
+  /** Transient: X-Email targets for outbound email notification. Stripped before the message is stored. */
+  email?: string;
 };
 
 export type PublishInput = {
